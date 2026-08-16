@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -65,6 +66,27 @@ class LambdaTests(unittest.TestCase):
         result = lh.run_lambda_cycle(Settings(ntfy_topic="secret"), object(), store)
         self.assertEqual(result["health_notifications_sent"], 1)
         self.assertEqual(result["error_sources"], ["amazon"])
+
+    @patch("lambda_handler.run_lambda_cycle", return_value={"ok": True})
+    @patch("lambda_handler.DynamoStateStore")
+    def test_lambda_discards_invalid_ntfy_token(self, store_cls, run_cycle):
+        previous_client = lh._CLIENT
+        lh._CLIENT = object()
+        try:
+            with patch.dict(
+                os.environ,
+                {
+                    "DYNAMODB_TABLE": "test-table",
+                    "NTFY_TOPIC": "secret-topic",
+                    "NTFY_TOKEN": "unused",
+                },
+                clear=False,
+            ):
+                lh.lambda_handler({}, None)
+        finally:
+            lh._CLIENT = previous_client
+        settings = run_cycle.call_args.args[0]
+        self.assertEqual(settings.ntfy_token, "")
 
 
 if __name__ == "__main__":
