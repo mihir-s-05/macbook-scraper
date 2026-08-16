@@ -3,9 +3,12 @@ from unittest.mock import patch
 
 from macbook_scraper import Settings, is_match
 from retailer_hardening import (
+    _send_ntfy_message,
     amazon_block_reason,
     bestbuy_api_url,
+    bestbuy_category_url,
     scrape_bestbuy_api,
+    scrape_bestbuy_modern,
     update_source_health,
 )
 
@@ -30,12 +33,46 @@ class RetailerHardeningTests(unittest.TestCase):
         self.assertIn("apiKey=secret", url)
         self.assertIn("pageSize=100", url)
 
+    def test_bestbuy_category_url_uses_server_rendered_facets(self):
+        url = bestbuy_category_url(24)
+        self.assertIn("browsedCategory=pcmcat247400050001", url)
+        self.assertIn("24+gigabytes", url)
+        self.assertIn("1+TB+-+1.9+TB", url)
+        self.assertIn("intl=nosplash", url)
+
+    def test_bestbuy_modern_product_url_parser(self):
+        html = '''<div class="product-card">
+          <h2><a href="/product/apple-macbook-air-m5/JJGCQLKHZ5/sku/6571045">Apple - MacBook Air 15-inch Laptop - M5 chip - 24GB Memory - 1TB SSD - Midnight</a></h2>
+          <div data-testid="customer-price">$1,199.00</div>
+          <div>The comparable value is $1,499.00</div>
+          <div>More options from $1,099.00</div>
+        </div>'''
+        item = scrape_bestbuy_modern(html)[0]
+        self.assertEqual(item.source_id, "6571045")
+        self.assertEqual(item.price, 1199.0)
+        self.assertTrue(item.url.endswith("/sku/6571045"))
+        self.assertTrue(is_match(item, Settings()))
+
     def test_amazon_block_detection(self):
         self.assertEqual(
             amazon_block_reason("Sorry, we just need to make sure you're not a robot"),
             "captcha",
         )
         self.assertIsNone(amazon_block_reason("normal product results"))
+
+    @patch("retailer_hardening.http.post")
+    def test_ntfy_ignores_non_access_token_value(self, post):
+        post.return_value.status_code = 200
+        settings = Settings(ntfy_topic="secret", ntfy_token="unused")
+        _send_ntfy_message(
+            settings,
+            title="test",
+            body="test body",
+            priority="high",
+            tags="warning",
+        )
+        headers = post.call_args.kwargs["headers"]
+        self.assertNotIn("Authorization", headers)
 
     @patch("retailer_hardening._send_ntfy_message")
     def test_source_health_alerts_then_recovers(self, send_message):
