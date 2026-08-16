@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import lambda_handler as lh
-from macbook_scraper import Client, Listing, Settings
+from macbook_scraper import Listing, Settings
 
 
 class FakeTable:
@@ -28,9 +28,10 @@ class LambdaTests(unittest.TestCase):
         self.assertEqual(store.load(), expected)
         self.assertEqual(table.item["pk"], "monitor-state")
 
+    @patch("lambda_handler.update_source_health", return_value=0)
     @patch("lambda_handler.send_ntfy")
-    @patch("lambda_handler.scrape_all")
-    def test_lambda_cycle_notifies_once_then_dedupes(self, scrape_all, send_ntfy):
+    @patch("lambda_handler.scrape_all_hardened")
+    def test_lambda_cycle_notifies_once_then_dedupes(self, scrape_all, send_ntfy, health):
         deal = Listing(
             source="amazon",
             source_id="B0TEST",
@@ -55,6 +56,15 @@ class LambdaTests(unittest.TestCase):
         self.assertEqual(first["notifications_sent"], 1)
         self.assertEqual(second["notifications_sent"], 0)
         self.assertEqual(send_ntfy.call_count, 1)
+        self.assertEqual(health.call_count, 2)
+
+    @patch("lambda_handler.update_source_health", return_value=1)
+    @patch("lambda_handler.scrape_all_hardened", return_value=([], {"amazon": "HTTP 503"}))
+    def test_lambda_reports_health_notifications(self, scrape_all, health):
+        store = lh.DynamoStateStore("unused", table=FakeTable())
+        result = lh.run_lambda_cycle(Settings(ntfy_topic="secret"), object(), store)
+        self.assertEqual(result["health_notifications_sent"], 1)
+        self.assertEqual(result["error_sources"], ["amazon"])
 
 
 if __name__ == "__main__":
