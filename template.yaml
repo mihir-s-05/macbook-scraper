@@ -16,6 +16,11 @@ Parameters:
   NtfyServer:
     Type: String
     Default: https://ntfy.sh
+  BestBuyApiKey:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Optional Best Buy Developer API key. Preferred over HTML scraping when set.
   MaxPrice:
     Type: String
     Default: '1200'
@@ -66,6 +71,9 @@ Resources:
           NTFY_SERVER: !Ref NtfyServer
           NTFY_TOPIC: !Ref NtfyTopic
           NTFY_TOKEN: !Ref NtfyToken
+          BESTBUY_API_KEY: !Ref BestBuyApiKey
+          SOURCE_ALERT_AFTER: '3'
+          SOURCE_REALERT_HOURS: '6'
           DYNAMODB_TABLE: !Ref ScraperStateTable
           LOG_LEVEL: INFO
       Policies:
