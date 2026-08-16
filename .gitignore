@@ -5,3 +5,6 @@ __pycache__/
 data/
 .venv/
 .DS_Store
+.aws-sam/
+samconfig.toml
+response.json
