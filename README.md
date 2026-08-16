@@ -35,29 +35,31 @@ EventBridge Scheduler (5 min)
 
 `template.yaml` is an AWS SAM template that creates the Lambda function, EventBridge Scheduler schedule, DynamoDB state table, IAM permissions, and a CloudWatch log group with seven-day retention.
 
-The DynamoDB table deliberately uses **provisioned capacity at 1 RCU / 1 WCU**, rather than on-demand capacity, so it fits comfortably inside DynamoDB's ongoing provisioned-capacity free tier. Lambda runs with 512 MB RAM and a 180-second timeout.
+The stack is intentionally conservative about the AWS free tier:
 
-### AWS prerequisites
+- DynamoDB uses **provisioned capacity at 1 RCU / 1 WCU**.
+- Lambda uses **256 MB RAM** with a **120-second hard timeout**.
+- Retailer HTTP requests time out after 15 seconds.
+- EventBridge retry attempts are disabled; the next normal scan is only five minutes later.
+- CloudWatch logs are retained for seven days rather than indefinitely.
 
-Install and configure:
+At a five-minute cadence there are at most 8,928 normal scheduled runs in a 31-day month. Even if every run somehow reached the full 120-second Lambda timeout, that is 267,840 GB-seconds at 256 MB.
 
-1. AWS CLI
-2. AWS SAM CLI
-3. Docker (recommended because `curl-cffi` contains native code and `sam build --use-container` builds it for the Lambda environment)
+## Easiest AWS setup: CloudShell
 
-Then verify your AWS credentials:
+You can deploy entirely from your browser without installing the AWS CLI or SAM CLI locally.
 
-```bash
-aws sts get-caller-identity
-```
-
-### Deploy to AWS
-
-Clone the repository and run:
+1. Sign in to the AWS Management Console.
+2. Select the AWS Region you want to use. `us-west-2` is a reasonable default.
+3. Open **CloudShell** from the terminal icon in the AWS console header.
+4. Run:
 
 ```bash
 git clone https://github.com/mihir-s-05/macbook-scraper.git
 cd macbook-scraper
+aws sts get-caller-identity
+sam --version
+docker --version
 sam build --use-container
 sam deploy --guided
 ```
@@ -66,7 +68,7 @@ Suggested guided-deploy answers:
 
 ```text
 Stack Name: macbook-scraper
-AWS Region: us-west-2 (or your preferred region)
+AWS Region: us-west-2 (or the region you selected)
 Parameter NtfyTopic: <your long secret ntfy topic>
 Parameter NtfyToken: <blank unless you protected the topic>
 Parameter NtfyServer: https://ntfy.sh
@@ -80,9 +82,29 @@ Disable rollback: N
 Save arguments to configuration file: Y
 ```
 
-Do not commit the ntfy topic/token. SAM passes them to CloudFormation as `NoEcho` parameters.
+Do not commit the ntfy topic/token. SAM passes them to CloudFormation as `NoEcho` parameters, and `samconfig.toml` is ignored by this repository.
 
-After deployment, find the generated function name:
+### Local-machine alternative
+
+If you prefer deploying from your own computer, install and configure:
+
+1. AWS CLI
+2. AWS SAM CLI
+3. Docker
+
+Then use the same commands:
+
+```bash
+aws sts get-caller-identity
+sam build --use-container
+sam deploy --guided
+```
+
+Docker is recommended for `sam build` because `curl-cffi` contains native code and the container build targets the Lambda Linux environment.
+
+## Verify the AWS deployment
+
+After deployment, get the generated function name:
 
 ```bash
 FUNCTION_NAME=$(aws cloudformation describe-stacks \
@@ -93,7 +115,7 @@ FUNCTION_NAME=$(aws cloudformation describe-stacks \
 echo "$FUNCTION_NAME"
 ```
 
-Run one manual scan immediately:
+Run one manual scan:
 
 ```bash
 aws lambda invoke \
@@ -116,19 +138,25 @@ A successful response looks roughly like:
 }
 ```
 
-No notification is expected unless a qualifying deal exists.
+No ntfy notification is expected unless a qualifying deal currently exists.
 
-Watch logs while testing:
+Inspect recent logs:
+
+```bash
+aws logs tail "/aws/lambda/$FUNCTION_NAME" --since 10m
+```
+
+For live logs during a manual invocation:
 
 ```bash
 aws logs tail "/aws/lambda/$FUNCTION_NAME" --since 10m --follow
 ```
 
-The EventBridge Scheduler will then invoke it automatically every five minutes.
+The EventBridge Scheduler invokes the function automatically every five minutes after deployment.
 
 ### Updating the AWS deployment later
 
-After pulling code changes:
+From the cloned repository:
 
 ```bash
 git pull
@@ -136,17 +164,17 @@ sam build --use-container
 sam deploy
 ```
 
-Because guided deploy saves the stack parameters locally, later deployments do not need all of the answers again.
+Guided deploy saves the stack configuration locally, so later deployments do not need all of the answers again.
 
 ### Remove all AWS resources
 
-If you ever stop using it:
+If you stop using the monitor:
 
 ```bash
 sam delete --stack-name macbook-scraper
 ```
 
-That removes the Lambda function, schedule, state table, and associated stack resources.
+That removes the Lambda function, schedule, state table, and the stack-managed resources.
 
 ## How alerts work
 
