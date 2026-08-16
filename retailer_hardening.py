@@ -5,21 +5,26 @@ import logging
 import random
 import time
 from typing import Any
-from urllib.parse import quote, quote_plus, urlencode
+from urllib.parse import quote, quote_plus, urlencode, urljoin
+
+from bs4 import BeautifulSoup
 
 from macbook_scraper import (
     APPLE_URL,
     BH_URLS,
     HAS_CURL_CFFI,
+    MONEY_RE,
     Client,
     Listing,
     Settings,
+    closest_price_container,
     http,
     listing,
     scrape_amazon,
     scrape_apple,
     scrape_bestbuy,
     scrape_bh,
+    stable_id,
 )
 
 LOG = logging.getLogger("macbook-scraper.retailers")
@@ -32,10 +37,25 @@ SOURCE_NAMES = {
 }
 SOURCE_ORDER = tuple(SOURCE_NAMES)
 
-BESTBUY_URLS = [
-    f"https://www.bestbuy.com/site/searchpage.jsp?st={quote_plus(q)}&intl=nosplash"
-    for q in ("MacBook 24GB 1TB", "MacBook 32GB 1TB")
-]
+
+def bestbuy_category_url(memory_gb: int) -> str:
+    # Best Buy's current MacBook category/facet pages are server-rendered, unlike
+    # the free-text search response that often returns an empty JS shell to AWS.
+    qp = (
+        f"systemmemoryram_facet=RAM~{memory_gb} gigabytes^"
+        "totalstoragecapacityrange_facet=Total Storage Capacity~1 TB - 1.9 TB"
+    )
+    params = {
+        "browsedCategory": "pcmcat247400050001",
+        "id": "pcat17071",
+        "qp": qp,
+        "st": "categoryid$pcmcat247400050001",
+        "intl": "nosplash",
+    }
+    return "https://www.bestbuy.com/site/searchpage.jsp?" + urlencode(params)
+
+
+BESTBUY_URLS = [bestbuy_category_url(memory) for memory in (24, 32)]
 AMAZON_URLS = [
     f"https://www.amazon.com/s?k={quote_plus(q)}&language=en_US"
     for q in ("Apple MacBook 24GB 1TB", "Apple MacBook 32GB 1TB")
@@ -108,6 +128,80 @@ def fetch_bestbuy_api(client: Client, api_key: str) -> list[Listing]:
     return items
 
 
+def _first_money(text: str) -> float | None:
+    match = MONEY_RE.search(text)
+    if not match:
+        return None
+    return float(match.group(1).replace(",", ""))
+
+
+def scrape_bestbuy_modern(html: str) -> list[Listing]:
+    """Parse both Best Buy's current /product/.../sku/<id> cards and legacy cards."""
+    soup = BeautifulSoup(html, "html.parser")
+    found: dict[str, Listing] = {}
+    anchors = soup.select(
+        "a[href*='/product/'][href*='/sku/'], "
+        "a[href*='/site/'][href*='.p']"
+    )
+    for anchor in anchors:
+        title = anchor.get_text(" ", strip=True)
+        if "macbook" not in title.lower():
+            parent_heading = anchor.find_parent(["h2", "h3", "h4"])
+            if parent_heading:
+                title = parent_heading.get_text(" ", strip=True)
+        if "macbook" not in title.lower():
+            continue
+
+        card = closest_price_container(anchor)
+        if card is None:
+            continue
+        text = card.get_text(" ", strip=True)
+
+        price: float | None = None
+        for selector in (
+            "[data-testid='price-block-customer-price']",
+            "[data-testid='customer-price']",
+            "[data-testid*='customer-price']",
+            ".priceView-customer-price",
+        ):
+            element = card.select_one(selector)
+            if element and (candidate := _first_money(element.get_text(" ", strip=True))):
+                price = candidate
+                break
+        # On current server-rendered category cards the primary/new price is the
+        # first dollar amount; later amounts are comparison/open-box prices.
+        if price is None:
+            price = _first_money(text)
+        if price is None:
+            continue
+
+        href = anchor.get("href", "")
+        url = urljoin("https://www.bestbuy.com", href)
+        sku_match = re_search_sku(url)
+        source_id = sku_match or stable_id(url.split("?")[0])
+        found[source_id] = listing(
+            "bestbuy",
+            source_id,
+            title,
+            url,
+            price,
+            text=text,
+            in_stock=not bool(_OUT_OF_STOCK_RE.search(text)),
+        )
+    return list(found.values())
+
+
+def re_search_sku(url: str) -> str | None:
+    import re
+
+    match = re.search(r"(?:/sku/|skuId=)(\d+)", url)
+    return match.group(1) if match else None
+
+
+import re as _re
+_OUT_OF_STOCK_RE = _re.compile(r"sold out|unavailable", _re.I)
+
+
 def amazon_block_reason(html: str) -> str | None:
     lower = html.lower()
     markers = {
@@ -132,6 +226,36 @@ def _fetch_with_profile(client: Client, url: str, profile: str) -> str:
     if response.status_code >= 400:
         raise RuntimeError(f"HTTP {response.status_code}")
     return response.text
+
+
+def fetch_bh(client: Client, url: str) -> list[Listing]:
+    failures: list[str] = []
+    for profile in ("chrome", "safari"):
+        try:
+            html = _fetch_with_profile(client, url, profile)
+            items = scrape_bh(html)
+            if items:
+                return items
+            failures.append(f"{profile}: parsed 0 listings")
+        except Exception as exc:
+            failures.append(f"{profile}: {exc}")
+    raise RuntimeError("B&H unavailable: " + "; ".join(failures))
+
+
+def fetch_bestbuy_html(client: Client, url: str) -> list[Listing]:
+    failures: list[str] = []
+    for profile in ("chrome", "safari"):
+        try:
+            html = _fetch_with_profile(client, url, profile)
+            items = scrape_bestbuy_modern(html)
+            if not items:
+                items = scrape_bestbuy(html)
+            if items:
+                return items
+            failures.append(f"{profile}: parsed 0 product cards")
+        except Exception as exc:
+            failures.append(f"{profile}: {exc}")
+    raise RuntimeError("Best Buy unavailable: " + "; ".join(failures))
 
 
 def fetch_amazon(client: Client, url: str) -> list[Listing]:
@@ -177,7 +301,7 @@ def scrape_all_hardened(client: Client, settings: Settings) -> tuple[list[Listin
     bh_failures: list[str] = []
     for url in BH_URLS:
         try:
-            items = scrape_bh(client.get(url))
+            items = fetch_bh(client, url)
             LOG.info("bh: parsed %d listings", len(items))
             bh_items.extend(items)
         except Exception as exc:
@@ -204,7 +328,7 @@ def scrape_all_hardened(client: Client, settings: Settings) -> tuple[list[Listin
     if not bestbuy_items:
         for url in BESTBUY_URLS:
             try:
-                items = scrape_bestbuy(client.get(url))
+                items = fetch_bestbuy_html(client, url)
                 LOG.info("bestbuy_html: parsed %d listings", len(items))
                 bestbuy_items.extend(items)
             except Exception as exc:
@@ -251,7 +375,7 @@ def _send_ntfy_message(
         LOG.warning("source-health message suppressed: NTFY_TOPIC is not configured")
         return
     headers = {"Title": title, "Priority": priority, "Tags": tags}
-    if settings.ntfy_token:
+    if settings.ntfy_token.startswith("tk_"):
         headers["Authorization"] = f"Bearer {settings.ntfy_token}"
     kwargs: dict[str, Any] = {
         "data": body.encode("utf-8"),
