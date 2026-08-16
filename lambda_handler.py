@@ -8,23 +8,17 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
-from macbook_scraper import Client, Listing, Settings, is_match, scrape_all, send_ntfy
+from macbook_scraper import Client, Settings, is_match, send_ntfy
+from retailer_hardening import scrape_all_hardened, update_source_health
 
 LOG = logging.getLogger("macbook-scraper.lambda")
 STATE_KEY = "monitor-state"
 
 
 class DynamoStateStore:
-    """Tiny DynamoDB-backed state store used by the Lambda deployment.
-
-    The entire monitor state is stored in one item. The scraper tracks a small
-    number of listings and prunes entries older than 30 days, so the item stays
-    well below DynamoDB's item-size limit for this workload.
-    """
-
     def __init__(self, table_name: str, *, table: Any | None = None):
         if table is None:
-            import boto3  # Lambda's Python runtime includes boto3.
+            import boto3
 
             table = boto3.resource("dynamodb").Table(table_name)
         self.table = table
@@ -55,55 +49,42 @@ class DynamoStateStore:
         )
 
 
-def run_lambda_cycle(s: Settings, client: Client, store: DynamoStateStore) -> dict[str, Any]:
-    """Run one scraper cycle and persist dedupe state in DynamoDB."""
-
+def run_lambda_cycle(settings: Settings, client: Client, store: DynamoStateStore) -> dict[str, Any]:
     now = time.time()
-    items, errors = scrape_all(client)
+    items, errors = scrape_all_hardened(client, settings)
     matches = sorted(
-        (x for x in items if is_match(x, s)),
-        key=lambda x: (x.price, -x.memory_gb, -x.storage_gb),
+        (item for item in items if is_match(item, settings)),
+        key=lambda item: (item.price, -item.memory_gb, -item.storage_gb),
     )
     LOG.info(
         "cycle: %d listings, %d matches <= $%.2f; errors=%s",
         len(items),
         len(matches),
-        s.max_price,
+        settings.max_price,
         sorted(errors) or "none",
     )
 
     state = store.load()
     state.setdefault("listings", {})
-    sent = 0
+    health_sent = update_source_health(settings, state, errors, now)
+    deal_sent = 0
 
-    for x in matches:
-        old = state["listings"].get(x.key)
+    for item in matches:
+        old = state["listings"].get(item.key)
         notify = (
             not old
-            or x.price < float(old.get("last_notified_price", 1e18)) - 0.009
-            or now - float(old.get("last_seen", now)) >= s.realert_hours * 3600
+            or item.price < float(old.get("last_notified_price", 1e18)) - 0.009
+            or now - float(old.get("last_seen", now)) >= settings.realert_hours * 3600
         )
-
         if notify:
-            send_ntfy(s, x)
-            sent += 1
+            send_ntfy(settings, item)
+            deal_sent += 1
 
         record = old or {}
-        record.update(
-            {
-                "last_seen": now,
-                "last_price": x.price,
-                "listing": asdict(x),
-            }
-        )
+        record.update({"last_seen": now, "last_price": item.price, "listing": asdict(item)})
         if notify:
-            record.update(
-                {
-                    "last_notified_price": x.price,
-                    "last_notified_at": now,
-                }
-            )
-        state["listings"][x.key] = record
+            record.update({"last_notified_price": item.price, "last_notified_at": now})
+        state["listings"][item.key] = record
 
     cutoff = now - 30 * 86400
     state["listings"] = {
@@ -124,7 +105,8 @@ def run_lambda_cycle(s: Settings, client: Client, store: DynamoStateStore) -> di
         "ok": True,
         "listings": len(items),
         "matches": len(matches),
-        "notifications_sent": sent,
+        "notifications_sent": deal_sent,
+        "health_notifications_sent": health_sent,
         "error_sources": sorted(errors),
     }
 
@@ -133,16 +115,25 @@ _CLIENT: Client | None = None
 
 
 def lambda_handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]:
-    """AWS Lambda entry point invoked by EventBridge Scheduler."""
-
     global _CLIENT
 
     logging.getLogger().setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     settings = Settings.from_env()
+    object.__setattr__(settings, "bestbuy_api_key", os.getenv("BESTBUY_API_KEY", "").strip())
+    object.__setattr__(
+        settings,
+        "source_alert_after",
+        max(1, int(os.getenv("SOURCE_ALERT_AFTER", "3"))),
+    )
+    object.__setattr__(
+        settings,
+        "source_realert_hours",
+        float(os.getenv("SOURCE_REALERT_HOURS", "6")),
+    )
+
     table_name = os.getenv("DYNAMODB_TABLE", "").strip()
     if not table_name:
         raise RuntimeError("DYNAMODB_TABLE is required for the Lambda deployment")
-
     if _CLIENT is None:
         _CLIENT = Client(settings.timeout)
 
