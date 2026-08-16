@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote, quote_plus, urljoin
 
 from bs4 import BeautifulSoup
 
@@ -84,7 +84,9 @@ class Settings:
     timeout: int = 25
     state_path: str = "/data/state.json"
     realert_hours: float = 6
-    webhook: str = ""
+    ntfy_server: str = "https://ntfy.sh"
+    ntfy_topic: str = ""
+    ntfy_token: str = ""
     run_once: bool = False
     port: int = 0
 
@@ -94,12 +96,18 @@ class Settings:
             max_price=float(os.getenv("MAX_PRICE", "1200")),
             min_memory_gb=int(os.getenv("MIN_MEMORY_GB", "24")),
             min_storage_gb=int(os.getenv("MIN_STORAGE_GB", "1024")),
-            allowed_chips=tuple(x.strip().upper() for x in os.getenv("ALLOWED_CHIPS", "M4,M5").split(",") if x.strip()),
+            allowed_chips=tuple(
+                x.strip().upper()
+                for x in os.getenv("ALLOWED_CHIPS", "M4,M5").split(",")
+                if x.strip()
+            ),
             poll_seconds=max(60, int(os.getenv("POLL_INTERVAL_SECONDS", "300"))),
             timeout=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "25")),
             state_path=os.getenv("STATE_PATH", "/data/state.json"),
             realert_hours=float(os.getenv("REALERT_AFTER_HOURS", "6")),
-            webhook=os.getenv("DISCORD_WEBHOOK_URL", "").strip(),
+            ntfy_server=os.getenv("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/"),
+            ntfy_topic=os.getenv("NTFY_TOPIC", "").strip(),
+            ntfy_token=os.getenv("NTFY_TOKEN", "").strip(),
             run_once=os.getenv("RUN_ONCE", "false").lower() in {"1", "true", "yes"},
             port=int(os.getenv("PORT", "0") or 0),
         )
@@ -148,15 +156,34 @@ def parse_specs(text: str) -> tuple[int, int, str, str]:
     return memory, int(storage), chip, model
 
 
-def listing(source: str, source_id: str, title: str, url: str, price: float, *, text: str = "", condition: str = "new", in_stock: bool = True, memory: int | None = None, storage: int | None = None, chip: str | None = None, model: str | None = None) -> Listing:
+def listing(
+    source: str,
+    source_id: str,
+    title: str,
+    url: str,
+    price: float,
+    *,
+    text: str = "",
+    condition: str = "new",
+    in_stock: bool = True,
+    memory: int | None = None,
+    storage: int | None = None,
+    chip: str | None = None,
+    model: str | None = None,
+) -> Listing:
     pmem, pstore, pchip, pmodel = parse_specs(text or title)
     return Listing(
-        source, source_id, " ".join(title.split()), url, round(float(price), 2),
+        source,
+        source_id,
+        " ".join(title.split()),
+        url,
+        round(float(price), 2),
         pmem if memory is None else memory,
         pstore if storage is None else storage,
         pchip if chip is None else chip,
         pmodel if model is None else model,
-        condition, in_stock,
+        condition,
+        in_stock,
     )
 
 
@@ -174,7 +201,10 @@ def parse_capacity(raw: str | None) -> int:
 
 
 def scrape_apple(html: str) -> list[Listing]:
-    match = re.search(r"window\.REFURB_GRID_BOOTSTRAP\s*=\s*({[\s\S]*?})\s*;?\s*</script>", html)
+    match = re.search(
+        r"window\.REFURB_GRID_BOOTSTRAP\s*=\s*({[\s\S]*?})\s*;?\s*</script>",
+        html,
+    )
     if match:
         try:
             data = json.loads(match.group(1))
@@ -186,16 +216,25 @@ def scrape_apple(html: str) -> list[Listing]:
                 raw_price = tile.get("price", {}).get("currentPrice", {}).get("raw_amount", "")
                 price = float(re.sub(r"[^0-9.]", "", raw_price) or 0)
                 _, _, chip, parsed_model = parse_specs(title)
-                model = {"macbookair": "MacBook Air", "macbookpro": "MacBook Pro"}.get(dims.get("refurbClearModel", "").lower(), parsed_model)
+                model = {
+                    "macbookair": "MacBook Air",
+                    "macbookpro": "MacBook Pro",
+                }.get(dims.get("refurbClearModel", "").lower(), parsed_model)
                 if title and path and price:
-                    out.append(listing(
-                        "apple_refurb", tile.get("partNumber") or stable_id(path), title,
-                        urljoin("https://www.apple.com", path), price,
-                        condition="apple_certified_refurbished",
-                        memory=parse_memory(dims.get("tsMemorySize")),
-                        storage=parse_capacity(dims.get("dimensionCapacity")),
-                        chip=chip, model=model,
-                    ))
+                    out.append(
+                        listing(
+                            "apple_refurb",
+                            tile.get("partNumber") or stable_id(path),
+                            title,
+                            urljoin("https://www.apple.com", path),
+                            price,
+                            condition="apple_certified_refurbished",
+                            memory=parse_memory(dims.get("tsMemorySize")),
+                            storage=parse_capacity(dims.get("dimensionCapacity")),
+                            chip=chip,
+                            model=model,
+                        )
+                    )
             return out
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             pass
@@ -207,7 +246,17 @@ def scrape_apple(html: str) -> list[Listing]:
         p = card.select_one(".as-price-currentprice, .as-producttile-currentprice")
         if a and p and (price := parse_price(p.get_text(" ", strip=True))):
             href = a.get("href", "")
-            out.append(listing("apple_refurb", stable_id(href), a.get_text(" ", strip=True), urljoin("https://www.apple.com", href), price, text=card.get_text(" ", strip=True), condition="apple_certified_refurbished"))
+            out.append(
+                listing(
+                    "apple_refurb",
+                    stable_id(href),
+                    a.get_text(" ", strip=True),
+                    urljoin("https://www.apple.com", href),
+                    price,
+                    text=card.get_text(" ", strip=True),
+                    condition="apple_certified_refurbished",
+                )
+            )
     return out
 
 
@@ -239,11 +288,26 @@ def scrape_bh(html: str) -> list[Listing]:
         if "macbook" not in title.lower() or not (card := closest_price_container(a)):
             continue
         text = card.get_text(" ", strip=True)
-        price = selected_price(card, ("[data-selenium='uppedDecimalPriceFirst']", "[data-selenium='pricingPrice']", "[data-testid='price']"))
+        price = selected_price(
+            card,
+            (
+                "[data-selenium='uppedDecimalPriceFirst']",
+                "[data-selenium='pricingPrice']",
+                "[data-testid='price']",
+            ),
+        )
         if not price:
             continue
         url = urljoin("https://www.bhphotovideo.com", a.get("href", ""))
-        item = listing("bh", stable_id(url.split("?")[0]), title, url, price, text=text, in_stock=not bool(re.search(r"temporarily out of stock|discontinued", text, re.I)))
+        item = listing(
+            "bh",
+            stable_id(url.split("?")[0]),
+            title,
+            url,
+            price,
+            text=text,
+            in_stock=not bool(re.search(r"temporarily out of stock|discontinued", text, re.I)),
+        )
         found[item.source_id] = item
     return list(found.values())
 
@@ -252,42 +316,82 @@ def scrape_bestbuy(html: str) -> list[Listing]:
     soup, found = BeautifulSoup(html, "html.parser"), {}
     cards = soup.select("li.sku-item, .product-grid-view-container li, .shop-sku-list-item")
     if not cards:
-        cards = [c for a in soup.select('a[href*="/site/"][href*=".p"]') if (c := closest_price_container(a))]
+        cards = [
+            c
+            for a in soup.select('a[href*="/site/"][href*=".p"]')
+            if (c := closest_price_container(a))
+        ]
     for card in cards:
-        a = card.select_one("h4.sku-title a, .sku-title a, h4 a, h3 a, a[href*='/site/'][href*='.p']")
+        a = card.select_one(
+            "h4.sku-title a, .sku-title a, h4 a, h3 a, a[href*='/site/'][href*='.p']"
+        )
         if not a or "macbook" not in (title := a.get_text(" ", strip=True)).lower():
             continue
         text = card.get_text(" ", strip=True)
-        price = selected_price(card, ("[data-testid='price-block-customer-price']", "[data-testid='customer-price']", ".priceView-customer-price"))
+        price = selected_price(
+            card,
+            (
+                "[data-testid='price-block-customer-price']",
+                "[data-testid='customer-price']",
+                ".priceView-customer-price",
+            ),
+        )
         if not price:
             continue
         url = urljoin("https://www.bestbuy.com", a.get("href", ""))
         m = re.search(r"skuId=(\d+)", url)
         sid = m.group(1) if m else stable_id(url.split("?")[0])
-        found[sid] = listing("bestbuy", sid, title, url, price, text=text, in_stock=not bool(re.search(r"sold out|unavailable", text, re.I)))
+        found[sid] = listing(
+            "bestbuy",
+            sid,
+            title,
+            url,
+            price,
+            text=text,
+            in_stock=not bool(re.search(r"sold out|unavailable", text, re.I)),
+        )
     return list(found.values())
 
 
 def scrape_amazon(html: str) -> list[Listing]:
     soup, out = BeautifulSoup(html, "html.parser"), []
     for card in soup.select('div[data-component-type="s-search-result"][data-asin]'):
-        asin, h2, a, p = card.get("data-asin", "").strip(), card.select_one("h2"), card.select_one("h2 a"), card.select_one(".a-price .a-offscreen")
+        asin = card.get("data-asin", "").strip()
+        h2 = card.select_one("h2")
+        a = card.select_one("h2 a")
+        p = card.select_one(".a-price .a-offscreen")
         if not asin or not h2 or not a or not p:
             continue
         title = h2.get_text(" ", strip=True)
         price = parse_price(p.get_text(" ", strip=True))
         if "macbook" in title.lower() and price:
-            out.append(listing("amazon", asin, title, urljoin("https://www.amazon.com", a.get("href", "")), price, text=card.get_text(" ", strip=True)))
+            out.append(
+                listing(
+                    "amazon",
+                    asin,
+                    title,
+                    urljoin("https://www.amazon.com", a.get("href", "")),
+                    price,
+                    text=card.get_text(" ", strip=True),
+                )
+            )
     return out
 
 
 def is_match(x: Listing, s: Settings) -> bool:
     generation = (re.match(r"M\d+", x.chip.upper()) or [""])[0]
-    bad_condition = x.source != "apple_refurb" and any(t in x.title.lower() for t in ("renewed", "refurbished", "open-box", "open box", "pre-owned", "used"))
+    bad_condition = x.source != "apple_refurb" and any(
+        t in x.title.lower()
+        for t in ("renewed", "refurbished", "open-box", "open box", "pre-owned", "used")
+    )
     return (
-        x.in_stock and not bad_condition and x.model in {"MacBook Air", "MacBook Pro"}
-        and generation in s.allowed_chips and x.memory_gb >= s.min_memory_gb
-        and x.storage_gb >= s.min_storage_gb and x.price <= s.max_price
+        x.in_stock
+        and not bad_condition
+        and x.model in {"MacBook Air", "MacBook Pro"}
+        and generation in s.allowed_chips
+        and x.memory_gb >= s.min_memory_gb
+        and x.storage_gb >= s.min_storage_gb
+        and x.price <= s.max_price
     )
 
 
@@ -306,34 +410,59 @@ def save_state(path: str, state: dict[str, Any]) -> None:
     tmp.replace(p)
 
 
-def send_discord(s: Settings, x: Listing) -> None:
-    if not s.webhook:
-        LOG.warning("MATCH (no Discord webhook configured): %s", asdict(x))
+def build_ntfy_request(s: Settings, x: Listing) -> tuple[str, dict[str, str], str]:
+    topic = quote(s.ntfy_topic, safe="")
+    url = f"{s.ntfy_server}/{topic}"
+    source_name = {
+        "apple_refurb": "Apple Certified Refurbished",
+        "bh": "B&H Photo",
+        "bestbuy": "Best Buy",
+        "amazon": "Amazon",
+    }.get(x.source, x.source)
+    storage = f"{x.storage_gb / 1024:g} TB" if x.storage_gb >= 1024 else f"{x.storage_gb} GB"
+    body = (
+        f"${x.price:,.2f} — {x.title}\n"
+        f"{x.chip or 'Unknown chip'} · {x.memory_gb} GB RAM · {storage}\n"
+        f"{source_name} · {x.condition.replace('_', ' ')}\n"
+        "Tap to open the listing. Verify price and stock before checkout."
+    )
+    headers = {
+        "Title": f"MacBook deal: ${x.price:,.0f}",
+        "Priority": "urgent",
+        "Tags": "rotating_light,computer",
+        "Click": x.url,
+    }
+    if s.ntfy_token:
+        headers["Authorization"] = f"Bearer {s.ntfy_token}"
+    return url, headers, body
+
+
+def send_ntfy(s: Settings, x: Listing) -> None:
+    if not s.ntfy_topic:
+        LOG.warning("MATCH (no NTFY_TOPIC configured): %s", asdict(x))
         return
-    payload = {"content": "🚨 **MacBook deal matched your hard limit**", "embeds": [{
-        "title": f"${x.price:,.2f} — {x.title}", "url": x.url,
-        "fields": [
-            {"name": "Source", "value": x.source, "inline": True},
-            {"name": "Chip", "value": x.chip or "unknown", "inline": True},
-            {"name": "Memory", "value": f"{x.memory_gb} GB", "inline": True},
-            {"name": "Storage", "value": f"{x.storage_gb / 1024:g} TB", "inline": True},
-            {"name": "Condition", "value": x.condition.replace("_", " "), "inline": True},
-        ], "footer": {"text": "macbook-scraper • verify price/stock before checkout"},
-    }]}
-    kwargs: dict[str, Any] = {"json": payload, "timeout": s.timeout}
+    url, headers, body = build_ntfy_request(s, x)
+    kwargs: dict[str, Any] = {
+        "data": body.encode("utf-8"),
+        "headers": headers,
+        "timeout": s.timeout,
+    }
     if HAS_CURL_CFFI:
         kwargs["impersonate"] = "chrome"
-    r = http.post(s.webhook, **kwargs)
-    if r.status_code >= 400:
-        raise RuntimeError(f"Discord webhook HTTP {r.status_code}: {r.text[:200]}")
+    response = http.post(url, **kwargs)
+    if response.status_code >= 400:
+        raise RuntimeError(f"ntfy HTTP {response.status_code}: {response.text[:200]}")
 
 
 def scrape_all(client: Client) -> tuple[list[Listing], dict[str, str]]:
-    jobs: list[tuple[str, str, Callable[[str], list[Listing]]]] = [("apple_refurb", APPLE_URL, scrape_apple)]
+    jobs: list[tuple[str, str, Callable[[str], list[Listing]]]] = [
+        ("apple_refurb", APPLE_URL, scrape_apple)
+    ]
     jobs += [("bh", u, scrape_bh) for u in BH_URLS]
     jobs += [("bestbuy", u, scrape_bestbuy) for u in BESTBUY_URLS]
     jobs += [("amazon", u, scrape_amazon) for u in AMAZON_URLS]
-    found, errors = {}, {}
+    found: dict[str, Listing] = {}
+    errors: dict[str, str] = {}
     for i, (source, url, parser) in enumerate(jobs):
         try:
             items = parser(client.get(url))
@@ -352,16 +481,29 @@ def scrape_all(client: Client) -> tuple[list[Listing], dict[str, str]]:
 def run_cycle(s: Settings, client: Client) -> int:
     now = time.time()
     items, errors = scrape_all(client)
-    matches = sorted((x for x in items if is_match(x, s)), key=lambda x: (x.price, -x.memory_gb, -x.storage_gb))
-    LOG.info("cycle: %d listings, %d matches <= $%.2f; errors=%s", len(items), len(matches), s.max_price, sorted(errors) or "none")
+    matches = sorted(
+        (x for x in items if is_match(x, s)),
+        key=lambda x: (x.price, -x.memory_gb, -x.storage_gb),
+    )
+    LOG.info(
+        "cycle: %d listings, %d matches <= $%.2f; errors=%s",
+        len(items),
+        len(matches),
+        s.max_price,
+        sorted(errors) or "none",
+    )
     state = load_state(s.state_path)
     state.setdefault("listings", {})
     sent = 0
     for x in matches:
         old = state["listings"].get(x.key)
-        notify = not old or x.price < float(old.get("last_notified_price", 1e18)) - 0.009 or now - float(old.get("last_seen", now)) >= s.realert_hours * 3600
+        notify = (
+            not old
+            or x.price < float(old.get("last_notified_price", 1e18)) - 0.009
+            or now - float(old.get("last_seen", now)) >= s.realert_hours * 3600
+        )
         if notify:
-            send_discord(s, x)
+            send_ntfy(s, x)
             sent += 1
         record = old or {}
         record.update({"last_seen": now, "last_price": x.price, "listing": asdict(x)})
@@ -369,8 +511,18 @@ def run_cycle(s: Settings, client: Client) -> int:
             record.update({"last_notified_price": x.price, "last_notified_at": now})
         state["listings"][x.key] = record
     cutoff = now - 30 * 86400
-    state["listings"] = {k: v for k, v in state["listings"].items() if float(v.get("last_seen", 0)) >= cutoff}
-    state.update({"last_cycle_at": now, "last_cycle_iso": datetime.now(timezone.utc).isoformat(), "last_error_sources": errors})
+    state["listings"] = {
+        k: v
+        for k, v in state["listings"].items()
+        if float(v.get("last_seen", 0)) >= cutoff
+    }
+    state.update(
+        {
+            "last_cycle_at": now,
+            "last_cycle_iso": datetime.now(timezone.utc).isoformat(),
+            "last_error_sources": errors,
+        }
+    )
     save_state(s.state_path, state)
     return sent
 
@@ -379,19 +531,40 @@ def start_health_server(port: int) -> None:
     if port <= 0:
         return
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             body = b'{"ok":true,"service":"macbook-scraper"}\n'
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, *_: Any) -> None:
             pass
-    threading.Thread(target=ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever, daemon=True).start()
+
+    threading.Thread(
+        target=ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever,
+        daemon=True,
+    ).start()
 
 
 def main() -> int:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     s = Settings.from_env()
-    LOG.info("target: <= $%.2f, >= %dGB RAM, >= %dGB storage, chips=%s", s.max_price, s.min_memory_gb, s.min_storage_gb, ",".join(s.allowed_chips))
+    LOG.info(
+        "target: <= $%.2f, >= %dGB RAM, >= %dGB storage, chips=%s",
+        s.max_price,
+        s.min_memory_gb,
+        s.min_storage_gb,
+        ",".join(s.allowed_chips),
+    )
+    if not s.ntfy_topic:
+        LOG.warning("NTFY_TOPIC is not configured; matches will only be logged")
     start_health_server(s.port)
     client = Client(s.timeout)
     while True:
@@ -399,7 +572,7 @@ def main() -> int:
         try:
             sent = run_cycle(s, client)
             if sent:
-                LOG.info("sent %d notification(s)", sent)
+                LOG.info("sent %d ntfy notification(s)", sent)
         except Exception:
             LOG.exception("monitor cycle crashed")
         if s.run_once:
