@@ -119,6 +119,14 @@ def lambda_handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]
 
     logging.getLogger().setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     settings = Settings.from_env()
+
+    # ntfy access tokens always use the tk_ prefix. If SAM guided deploy captured
+    # a placeholder or other non-token value, silently treat it as unauthenticated
+    # publishing instead of sending a bad Authorization header and getting HTTP 401.
+    if settings.ntfy_token and not settings.ntfy_token.startswith("tk_"):
+        LOG.warning("Ignoring NTFY_TOKEN because it is not a valid tk_... access token")
+        object.__setattr__(settings, "ntfy_token", "")
+
     object.__setattr__(settings, "bestbuy_api_key", os.getenv("BESTBUY_API_KEY", "").strip())
     object.__setattr__(
         settings,
