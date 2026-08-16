@@ -53,15 +53,15 @@ Resources:
       Runtime: python3.12
       Architectures:
         - x86_64
-      MemorySize: 512
-      Timeout: 180
+      MemorySize: 256
+      Timeout: 120
       Environment:
         Variables:
           MAX_PRICE: !Ref MaxPrice
           MIN_MEMORY_GB: !Ref MinMemoryGB
           MIN_STORAGE_GB: !Ref MinStorageGB
           ALLOWED_CHIPS: !Ref AllowedChips
-          REQUEST_TIMEOUT_SECONDS: '20'
+          REQUEST_TIMEOUT_SECONDS: '15'
           REALERT_AFTER_HOURS: '6'
           NTFY_SERVER: !Ref NtfyServer
           NTFY_TOPIC: !Ref NtfyTopic
@@ -81,7 +81,7 @@ Resources:
             FlexibleTimeWindow:
               Mode: 'OFF'
             RetryPolicy:
-              MaximumRetryAttempts: 1
+              MaximumRetryAttempts: 0
               MaximumEventAgeInSeconds: 240
 
   ScraperLogGroup:
