@@ -1,6 +1,15 @@
 import unittest
 
-from macbook_scraper import Settings, is_match, parse_specs, scrape_amazon, scrape_apple, scrape_bestbuy, scrape_bh
+from macbook_scraper import (
+    Settings,
+    build_ntfy_request,
+    is_match,
+    parse_specs,
+    scrape_amazon,
+    scrape_apple,
+    scrape_bestbuy,
+    scrape_bh,
+)
 
 
 class ScraperTests(unittest.TestCase):
@@ -59,6 +68,23 @@ class ScraperTests(unittest.TestCase):
         listing = scrape_bh(html)[0]
         self.assertEqual(listing.price, 1199.0)
         self.assertTrue(is_match(listing, Settings()))
+
+    def test_ntfy_request_is_urgent_clickable_and_supports_auth(self):
+        html = '''<div data-component-type="s-search-result" data-asin="B0TEST">
+          <h2><a href="/dp/B0TEST">Apple MacBook Air M4 24GB Memory 1TB SSD</a></h2>
+          <span class="a-price"><span class="a-offscreen">$1,199.00</span></span>
+        </div>'''
+        deal = scrape_amazon(html)[0]
+        settings = Settings(ntfy_topic="macbook deals secret", ntfy_token="tk_test")
+        url, headers, body = build_ntfy_request(settings, deal)
+
+        self.assertEqual(url, "https://ntfy.sh/macbook%20deals%20secret")
+        self.assertEqual(headers["Priority"], "urgent")
+        self.assertEqual(headers["Click"], deal.url)
+        self.assertEqual(headers["Authorization"], "Bearer tk_test")
+        self.assertIn("$1,199.00", body)
+        self.assertIn("24 GB RAM", body)
+        self.assertIn("1 TB", body)
 
 
 if __name__ == "__main__":
