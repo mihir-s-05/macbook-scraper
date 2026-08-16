@@ -8,8 +8,9 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
+import retailer_hardening as retailers
 from macbook_scraper import Client, Settings, is_match, send_ntfy
-from retailer_hardening import scrape_all_hardened, update_source_health
+from retailer_hardening import update_source_health
 
 LOG = logging.getLogger("macbook-scraper.lambda")
 STATE_KEY = "monitor-state"
@@ -49,9 +50,38 @@ class DynamoStateStore:
         )
 
 
+def scrape_configured_sources(
+    settings: Settings,
+    client: Client,
+) -> tuple[list[Any], dict[str, str]]:
+    """Run the cloud-safe sources and optionally Amazon.
+
+    Amazon is disabled by default for Lambda because repeated requests from AWS
+    egress IPs are currently returning HTTP 503. Keeping the existing Amazon
+    implementation behind ENABLE_AMAZON means it can be re-enabled later
+    without changing the scraper again.
+    """
+
+    if bool(getattr(settings, "amazon_enabled", False)):
+        return retailers.scrape_all_hardened(client, settings)
+
+    original_amazon_urls = retailers.AMAZON_URLS
+    retailers.AMAZON_URLS = []
+    try:
+        items, errors = retailers.scrape_all_hardened(client, settings)
+    finally:
+        retailers.AMAZON_URLS = original_amazon_urls
+
+    # scrape_all_hardened treats an empty Amazon job list as a source error.
+    # For an intentionally disabled source, remove that synthetic error.
+    errors.pop("amazon", None)
+    LOG.info("amazon: disabled by configuration")
+    return items, errors
+
+
 def run_lambda_cycle(settings: Settings, client: Client, store: DynamoStateStore) -> dict[str, Any]:
     now = time.time()
-    items, errors = scrape_all_hardened(client, settings)
+    items, errors = scrape_configured_sources(settings, client)
     matches = sorted(
         (item for item in items if is_match(item, settings)),
         key=lambda item: (item.price, -item.memory_gb, -item.storage_gb),
@@ -66,6 +96,22 @@ def run_lambda_cycle(settings: Settings, client: Client, store: DynamoStateStore
 
     state = store.load()
     state.setdefault("listings", {})
+
+    disabled_sources: list[str] = []
+    if not bool(getattr(settings, "amazon_enabled", False)):
+        disabled_sources.append("amazon")
+        # Clear any old Amazon failure/alert state without emitting a fake
+        # recovery notification when the source is intentionally disabled.
+        amazon_health = state.setdefault("source_health", {}).setdefault("amazon", {})
+        amazon_health.clear()
+        amazon_health.update(
+            {
+                "disabled": True,
+                "consecutive_failures": 0,
+                "disabled_at": now,
+            }
+        )
+
     health_sent = update_source_health(settings, state, errors, now)
     deal_sent = 0
 
@@ -97,6 +143,7 @@ def run_lambda_cycle(settings: Settings, client: Client, store: DynamoStateStore
             "last_cycle_at": now,
             "last_cycle_iso": datetime.now(timezone.utc).isoformat(),
             "last_error_sources": errors,
+            "disabled_sources": disabled_sources,
         }
     )
     store.save(state)
@@ -108,6 +155,7 @@ def run_lambda_cycle(settings: Settings, client: Client, store: DynamoStateStore
         "notifications_sent": deal_sent,
         "health_notifications_sent": health_sent,
         "error_sources": sorted(errors),
+        "disabled_sources": disabled_sources,
     }
 
 
@@ -128,6 +176,11 @@ def lambda_handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]
         object.__setattr__(settings, "ntfy_token", "")
 
     object.__setattr__(settings, "bestbuy_api_key", os.getenv("BESTBUY_API_KEY", "").strip())
+    object.__setattr__(
+        settings,
+        "amazon_enabled",
+        os.getenv("ENABLE_AMAZON", "false").strip().lower() in {"1", "true", "yes", "on"},
+    )
     object.__setattr__(
         settings,
         "source_alert_after",
