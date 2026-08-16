@@ -79,7 +79,7 @@ Resources:
             ScheduleExpression: rate(5 minutes)
             State: ENABLED
             FlexibleTimeWindow:
-              Mode: OFF
+              Mode: 'OFF'
             RetryPolicy:
               MaximumRetryAttempts: 1
               MaximumEventAgeInSeconds: 240
