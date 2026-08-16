@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  MacBook deal monitor: EventBridge Scheduler -> Lambda -> DynamoDB -> ntfy.
+
+Parameters:
+  NtfyTopic:
+    Type: String
+    NoEcho: true
+    Description: Secret ntfy.sh topic name used for phone notifications.
+  NtfyToken:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Optional ntfy access token for a protected/reserved topic.
+  NtfyServer:
+    Type: String
+    Default: https://ntfy.sh
+  MaxPrice:
+    Type: String
+    Default: '1200'
+  MinMemoryGB:
+    Type: String
+    Default: '24'
+  MinStorageGB:
+    Type: String
+    Default: '1024'
+  AllowedChips:
+    Type: String
+    Default: M4,M5
+
+Resources:
+  ScraperStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableClass: STANDARD
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+
+  MacbookScraperFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./
+      Handler: lambda_handler.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+      MemorySize: 512
+      Timeout: 180
+      Environment:
+        Variables:
+          MAX_PRICE: !Ref MaxPrice
+          MIN_MEMORY_GB: !Ref MinMemoryGB
+          MIN_STORAGE_GB: !Ref MinStorageGB
+          ALLOWED_CHIPS: !Ref AllowedChips
+          REQUEST_TIMEOUT_SECONDS: '20'
+          REALERT_AFTER_HOURS: '6'
+          NTFY_SERVER: !Ref NtfyServer
+          NTFY_TOPIC: !Ref NtfyTopic
+          NTFY_TOKEN: !Ref NtfyToken
+          DYNAMODB_TABLE: !Ref ScraperStateTable
+          LOG_LEVEL: INFO
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ScraperStateTable
+      Events:
+        FiveMinutePoll:
+          Type: ScheduleV2
+          Properties:
+            Description: Check Apple Refurb, B&H, Best Buy, and Amazon every five minutes.
+            ScheduleExpression: rate(5 minutes)
+            State: ENABLED
+            FlexibleTimeWindow:
+              Mode: OFF
+            RetryPolicy:
+              MaximumRetryAttempts: 1
+              MaximumEventAgeInSeconds: 240
+
+  ScraperLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${MacbookScraperFunction}
+      RetentionInDays: 7
+
+Outputs:
+  FunctionName:
+    Description: Lambda function running the MacBook scraper.
+    Value: !Ref MacbookScraperFunction
+  StateTableName:
+    Description: DynamoDB table containing scraper dedupe state.
+    Value: !Ref ScraperStateTable
