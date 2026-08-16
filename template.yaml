@@ -21,6 +21,13 @@ Parameters:
     Default: ''
     NoEcho: true
     Description: Optional Best Buy Developer API key. Preferred over HTML scraping when set.
+  EnableAmazon:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Opt-in Amazon HTML scraping. Disabled by default because AWS egress is currently blocked.
   MaxPrice:
     Type: String
     Default: '1200'
@@ -72,6 +79,7 @@ Resources:
           NTFY_TOPIC: !Ref NtfyTopic
           NTFY_TOKEN: !Ref NtfyToken
           BESTBUY_API_KEY: !Ref BestBuyApiKey
+          ENABLE_AMAZON: !Ref EnableAmazon
           SOURCE_ALERT_AFTER: '3'
           SOURCE_REALERT_HOURS: '6'
           DYNAMODB_TABLE: !Ref ScraperStateTable
@@ -83,7 +91,7 @@ Resources:
         FiveMinutePoll:
           Type: ScheduleV2
           Properties:
-            Description: Check Apple Refurb, B&H, Best Buy, and Amazon every five minutes.
+            Description: Check Apple Refurb, B&H, and Best Buy every five minutes; Amazon is optional.
             ScheduleExpression: rate(5 minutes)
             State: ENABLED
             FlexibleTimeWindow:
