@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >-
-  MacBook deal monitor: EventBridge Scheduler -> Lambda -> DynamoDB -> ntfy.
+  15-inch MacBook Air deal monitor: EventBridge Scheduler -> Lambda -> DynamoDB -> ntfy.
 
 Parameters:
   NtfyTopic:
@@ -20,7 +20,7 @@ Parameters:
     Type: String
     Default: ''
     NoEcho: true
-    Description: Optional Best Buy Developer API key. Preferred over HTML scraping when set.
+    Description: Optional Best Buy Developer API key. HTML scraping is used when blank.
   EnableAmazon:
     Type: String
     Default: 'false'
@@ -28,6 +28,8 @@ Parameters:
       - 'true'
       - 'false'
     Description: Opt-in Amazon HTML scraping. Disabled by default because AWS egress is currently blocked.
+  # Kept for backwards compatibility with existing samconfig.toml files. The
+  # focused Lambda target uses TARGET_MAX_PRICE=1900 below instead.
   MaxPrice:
     Type: String
     Default: '1200'
@@ -69,6 +71,8 @@ Resources:
       Timeout: 120
       Environment:
         Variables:
+          # Focused target: 15-inch Air, M4/M5, >=24GB, >=1TB, strictly < $1900.
+          TARGET_MAX_PRICE: '1900'
           MAX_PRICE: !Ref MaxPrice
           MIN_MEMORY_GB: !Ref MinMemoryGB
           MIN_STORAGE_GB: !Ref MinStorageGB
@@ -91,7 +95,7 @@ Resources:
         FiveMinutePoll:
           Type: ScheduleV2
           Properties:
-            Description: Check Apple Refurb, B&H, and Best Buy every five minutes; Amazon is optional.
+            Description: Check Apple Refurb, B&H, Best Buy, Adorama, Abt, and Micro Center every five minutes; Amazon is optional.
             ScheduleExpression: rate(5 minutes)
             State: ENABLED
             FlexibleTimeWindow:
