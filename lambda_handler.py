@@ -14,6 +14,7 @@ from extra_retailers import EXTRA_SOURCE_NAMES, scrape_extra_sources
 from macbook_scraper import Client, Settings, send_ntfy
 from retailer_hardening import update_source_health
 from target_filter import is_target_match
+from target_sources import apply_target_source_queries
 
 LOG = logging.getLogger("macbook-scraper.lambda")
 STATE_KEY = "monitor-state"
@@ -22,6 +23,7 @@ STATE_KEY = "monitor-state"
 # same consecutive-failure/recovery alerts as the original sources.
 retailers.SOURCE_NAMES.update(EXTRA_SOURCE_NAMES)
 retailers.SOURCE_ORDER = tuple(retailers.SOURCE_NAMES)
+apply_target_source_queries(retailers)
 
 
 class DynamoStateStore:
@@ -119,8 +121,6 @@ def run_lambda_cycle(settings: Settings, client: Client, store: DynamoStateStore
     disabled_sources: list[str] = []
     if not bool(getattr(settings, "amazon_enabled", False)):
         disabled_sources.append("amazon")
-        # Clear any old Amazon failure/alert state without emitting a fake
-        # recovery notification when the source is intentionally disabled.
         amazon_health = state.setdefault("source_health", {}).setdefault("amazon", {})
         amazon_health.clear()
         amazon_health.update(
@@ -203,9 +203,6 @@ def lambda_handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]
     object.__setattr__(settings, "min_storage_gb", 1024)
     object.__setattr__(settings, "allowed_chips", ("M4", "M5"))
 
-    # ntfy access tokens always use the tk_ prefix. If SAM guided deploy captured
-    # a placeholder or other non-token value, silently treat it as unauthenticated
-    # publishing instead of sending a bad Authorization header and getting HTTP 401.
     if settings.ntfy_token and not settings.ntfy_token.startswith("tk_"):
         LOG.warning("Ignoring NTFY_TOKEN because it is not a valid tk_... access token")
         object.__setattr__(settings, "ntfy_token", "")
