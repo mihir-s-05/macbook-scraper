@@ -9,8 +9,8 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
+import extra_retailers as extras
 import retailer_hardening as retailers
-from extra_retailers import EXTRA_SOURCE_NAMES, scrape_extra_sources
 from macbook_scraper import Client, Settings, send_ntfy
 from retailer_hardening import update_source_health
 from target_filter import is_target_match
@@ -21,7 +21,7 @@ STATE_KEY = "monitor-state"
 
 # Extend the existing source-health machinery so the added retailers get the
 # same consecutive-failure/recovery alerts as the original sources.
-retailers.SOURCE_NAMES.update(EXTRA_SOURCE_NAMES)
+retailers.SOURCE_NAMES.update(extras.EXTRA_SOURCE_NAMES)
 retailers.SOURCE_ORDER = tuple(retailers.SOURCE_NAMES)
 apply_target_source_queries(retailers)
 
@@ -73,7 +73,7 @@ def scrape_configured_sources(
     settings: Settings,
     client: Client,
 ) -> tuple[list[Any], dict[str, str]]:
-    """Run Apple/B&H/Best Buy plus the added retailers; Amazon is opt-in."""
+    """Run cloud-safe retailers; Amazon and Adorama are opt-in on Lambda."""
 
     if bool(getattr(settings, "amazon_enabled", False)):
         core_items, core_errors = retailers.scrape_all_hardened(client, settings)
@@ -87,9 +87,23 @@ def scrape_configured_sources(
         core_errors.pop("amazon", None)
         LOG.info("amazon: disabled by configuration")
 
-    extra_items, extra_errors = scrape_extra_sources(client)
+    adorama_enabled = bool(getattr(settings, "adorama_enabled", False))
+    if adorama_enabled:
+        extra_items, extra_errors = extras.scrape_extra_sources(client)
+    else:
+        original_adorama_urls = extras.ADORAMA_URLS
+        extras.ADORAMA_URLS = []
+        try:
+            extra_items, extra_errors = extras.scrape_extra_sources(client)
+        finally:
+            extras.ADORAMA_URLS = original_adorama_urls
+        extra_errors.pop("adorama", None)
+        LOG.info("adorama: disabled by configuration")
+
     counts = Counter(item.source for item in extra_items)
-    for source in EXTRA_SOURCE_NAMES:
+    for source in extras.EXTRA_SOURCE_NAMES:
+        if source == "adorama" and not adorama_enabled:
+            continue
         if source in counts:
             LOG.info("%s: parsed %d listings", source, counts[source])
         elif source in extra_errors:
@@ -121,9 +135,16 @@ def run_lambda_cycle(settings: Settings, client: Client, store: DynamoStateStore
     disabled_sources: list[str] = []
     if not bool(getattr(settings, "amazon_enabled", False)):
         disabled_sources.append("amazon")
-        amazon_health = state.setdefault("source_health", {}).setdefault("amazon", {})
-        amazon_health.clear()
-        amazon_health.update(
+    if not bool(getattr(settings, "adorama_enabled", False)):
+        disabled_sources.append("adorama")
+
+    # Clear stale degraded/alert state for intentionally disabled sources without
+    # generating a misleading recovery notification.
+    health = state.setdefault("source_health", {})
+    for source in disabled_sources:
+        record = health.setdefault(source, {})
+        record.clear()
+        record.update(
             {
                 "disabled": True,
                 "consecutive_failures": 0,
@@ -212,6 +233,11 @@ def lambda_handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]
         settings,
         "amazon_enabled",
         os.getenv("ENABLE_AMAZON", "false").strip().lower() in {"1", "true", "yes", "on"},
+    )
+    object.__setattr__(
+        settings,
+        "adorama_enabled",
+        os.getenv("ENABLE_ADORAMA", "false").strip().lower() in {"1", "true", "yes", "on"},
     )
     object.__setattr__(
         settings,
