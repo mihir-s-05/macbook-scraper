@@ -28,6 +28,13 @@ Parameters:
       - 'true'
       - 'false'
     Description: Opt-in Amazon HTML scraping. Disabled by default because AWS egress is currently blocked.
+  EnableAdorama:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Opt-in Adorama HTML scraping. Disabled by default because AWS egress is currently returning HTTP 403.
   # Kept for backwards compatibility with existing samconfig.toml files. The
   # focused Lambda target uses TARGET_MAX_PRICE=1900 below instead.
   MaxPrice:
@@ -84,6 +91,7 @@ Resources:
           NTFY_TOKEN: !Ref NtfyToken
           BESTBUY_API_KEY: !Ref BestBuyApiKey
           ENABLE_AMAZON: !Ref EnableAmazon
+          ENABLE_ADORAMA: !Ref EnableAdorama
           SOURCE_ALERT_AFTER: '3'
           SOURCE_REALERT_HOURS: '6'
           DYNAMODB_TABLE: !Ref ScraperStateTable
@@ -95,7 +103,7 @@ Resources:
         FiveMinutePoll:
           Type: ScheduleV2
           Properties:
-            Description: Check Apple Refurb, B&H, Best Buy, Adorama, Abt, and Micro Center every five minutes; Amazon is optional.
+            Description: Check Apple Refurb, B&H, Best Buy, Abt, and Micro Center every five minutes; Amazon and Adorama are optional.
             ScheduleExpression: rate(5 minutes)
             State: ENABLED
             FlexibleTimeWindow:
