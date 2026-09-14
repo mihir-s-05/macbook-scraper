@@ -45,6 +45,22 @@ class TargetFilterTests(unittest.TestCase):
             )
         )
 
+    def test_accepts_apple_nonbreaking_hyphen_title(self):
+        self.assertTrue(
+            is_target_match(
+                make_listing(
+                    source="apple_refurb",
+                    title="Refurbished 15‑inch MacBook Air Apple M5 chip with 10‑Core CPU and 10‑Core GPU - Midnight",
+                    price=1699.0,
+                    condition="apple_certified_refurbished",
+                    memory_gb=24,
+                    storage_gb=1024,
+                    chip="M5",
+                ),
+                self.settings,
+            )
+        )
+
     def test_price_ceiling_is_strictly_less_than_1900(self):
         self.assertTrue(is_target_match(make_listing(price=1899.99), self.settings))
         self.assertFalse(is_target_match(make_listing(price=1900.00), self.settings))
