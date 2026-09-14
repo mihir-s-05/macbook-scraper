@@ -114,7 +114,6 @@ def _title_for_anchor(anchor) -> str:
         candidate = heading.get_text(" ", strip=True)
         if "macbook air" in candidate.lower():
             return candidate
-    # Some cards put the title next to an image/link rather than inside it.
     parent = anchor.parent
     if parent:
         candidate = parent.get_text(" ", strip=True)
@@ -153,6 +152,10 @@ def _parse_cards(
         if price is None:
             continue
 
+        # Micro Center spells the storage field out as "Solid State Drive".
+        # Normalize that phrase so the shared spec parser recognizes 1TB/2TB/etc.
+        spec_text = re.sub(r"\bSolid State Drive\b", "SSD", text, flags=re.I)
+
         url = urljoin(base_url, href)
         source_id = stable_id(url.split("?")[0])
         found[source_id] = listing(
@@ -161,7 +164,7 @@ def _parse_cards(
             title,
             url,
             price,
-            text=text,
+            text=spec_text,
             condition="new",
             in_stock=not bool(_OUT_RE.search(text)),
         )
