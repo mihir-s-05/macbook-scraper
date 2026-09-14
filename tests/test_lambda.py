@@ -56,6 +56,7 @@ class LambdaTests(unittest.TestCase):
             ntfy_topic="secret-topic",
         )
         object.__setattr__(settings, "amazon_enabled", False)
+        object.__setattr__(settings, "adorama_enabled", False)
         client = object()
 
         first = lh.run_lambda_cycle(settings, client, store)
@@ -63,45 +64,57 @@ class LambdaTests(unittest.TestCase):
 
         self.assertEqual(first["notifications_sent"], 1)
         self.assertEqual(second["notifications_sent"], 0)
-        self.assertEqual(first["disabled_sources"], ["amazon"])
+        self.assertEqual(first["disabled_sources"], ["amazon", "adorama"])
         self.assertEqual(send_ntfy.call_count, 1)
         self.assertEqual(health.call_count, 2)
 
     @patch("lambda_handler.update_source_health", return_value=1)
     @patch("lambda_handler.scrape_configured_sources", return_value=([], {"amazon": "HTTP 503"}))
-    def test_lambda_reports_health_notifications_when_amazon_enabled(self, scrape_all, health):
+    def test_lambda_reports_health_notifications_when_optional_sources_enabled(self, scrape_all, health):
         store = lh.DynamoStateStore("unused", table=FakeTable())
         settings = Settings(max_price=1900, ntfy_topic="secret")
         object.__setattr__(settings, "amazon_enabled", True)
+        object.__setattr__(settings, "adorama_enabled", True)
         result = lh.run_lambda_cycle(settings, object(), store)
         self.assertEqual(result["health_notifications_sent"], 1)
         self.assertEqual(result["error_sources"], ["amazon"])
         self.assertEqual(result["disabled_sources"], [])
 
-    @patch("lambda_handler.scrape_extra_sources", return_value=([], {}))
+    @patch("lambda_handler.extras.scrape_extra_sources")
     @patch("lambda_handler.retailers.scrape_all_hardened")
-    def test_scrape_configured_sources_skips_amazon_when_disabled(self, scrape_all, extra):
-        original_urls = list(lh.retailers.AMAZON_URLS)
-        seen_urls = []
+    def test_scrape_configured_sources_skips_disabled_cloud_sources(self, scrape_all, extra):
+        original_amazon_urls = list(lh.retailers.AMAZON_URLS)
+        original_adorama_urls = list(lh.extras.ADORAMA_URLS)
+        seen_amazon_urls = []
+        seen_adorama_urls = []
 
-        def fake_scrape(client, settings):
-            seen_urls.append(list(lh.retailers.AMAZON_URLS))
+        def fake_core(client, settings):
+            seen_amazon_urls.append(list(lh.retailers.AMAZON_URLS))
             return [], {"amazon": "parsed 0 listings"}
 
-        scrape_all.side_effect = fake_scrape
+        def fake_extra(client):
+            seen_adorama_urls.append(list(lh.extras.ADORAMA_URLS))
+            return [], {"adorama": "parsed 0 listings"}
+
+        scrape_all.side_effect = fake_core
+        extra.side_effect = fake_extra
         settings = Settings()
         object.__setattr__(settings, "amazon_enabled", False)
+        object.__setattr__(settings, "adorama_enabled", False)
 
         items, errors = lh.scrape_configured_sources(settings, object())
 
         self.assertEqual(items, [])
         self.assertNotIn("amazon", errors)
-        self.assertEqual(seen_urls, [[]])
-        self.assertEqual(lh.retailers.AMAZON_URLS, original_urls)
+        self.assertNotIn("adorama", errors)
+        self.assertEqual(seen_amazon_urls, [[]])
+        self.assertEqual(seen_adorama_urls, [[]])
+        self.assertEqual(lh.retailers.AMAZON_URLS, original_amazon_urls)
+        self.assertEqual(lh.extras.ADORAMA_URLS, original_adorama_urls)
 
     @patch("lambda_handler.run_lambda_cycle", return_value={"ok": True})
     @patch("lambda_handler.DynamoStateStore")
-    def test_lambda_sets_focused_target_and_disables_amazon_by_default(
+    def test_lambda_sets_focused_target_and_disables_blocked_sources_by_default(
         self, store_cls, run_cycle
     ):
         previous_client = lh._CLIENT
@@ -119,6 +132,7 @@ class LambdaTests(unittest.TestCase):
             ):
                 os.environ.pop("TARGET_MAX_PRICE", None)
                 os.environ.pop("ENABLE_AMAZON", None)
+                os.environ.pop("ENABLE_ADORAMA", None)
                 lh.lambda_handler({}, None)
         finally:
             lh._CLIENT = previous_client
@@ -126,6 +140,7 @@ class LambdaTests(unittest.TestCase):
         settings = run_cycle.call_args.args[0]
         self.assertEqual(settings.ntfy_token, "")
         self.assertFalse(settings.amazon_enabled)
+        self.assertFalse(settings.adorama_enabled)
         self.assertEqual(settings.max_price, 1900)
         self.assertEqual(settings.min_memory_gb, 24)
         self.assertEqual(settings.min_storage_gb, 1024)
