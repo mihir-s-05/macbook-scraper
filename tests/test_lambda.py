@@ -24,7 +24,7 @@ class LambdaTests(unittest.TestCase):
         store = lh.DynamoStateStore("unused", table=table)
         self.assertEqual(store.load(), {"listings": {}})
 
-        expected = {"listings": {"amazon:B0TEST": {"last_price": 1199.0}}}
+        expected = {"listings": {"bestbuy:TEST": {"last_price": 1799.0}}}
         store.save(expected)
         self.assertEqual(store.load(), expected)
         self.assertEqual(table.item["pk"], "monitor-state")
@@ -36,9 +36,9 @@ class LambdaTests(unittest.TestCase):
         deal = Listing(
             source="bestbuy",
             source_id="6571045",
-            title="Apple MacBook Air M4 24GB Memory 1TB SSD",
+            title="Apple MacBook Air 15-inch Laptop M4 24GB Memory 1TB SSD",
             url="https://www.bestbuy.com/product/example/sku/6571045",
-            price=1199.0,
+            price=1799.0,
             memory_gb=24,
             storage_gb=1024,
             chip="M4",
@@ -48,7 +48,13 @@ class LambdaTests(unittest.TestCase):
         scrape_all.return_value = ([deal], {})
 
         store = lh.DynamoStateStore("unused", table=FakeTable())
-        settings = Settings(ntfy_topic="secret-topic")
+        settings = Settings(
+            max_price=1900,
+            min_memory_gb=24,
+            min_storage_gb=1024,
+            allowed_chips=("M4", "M5"),
+            ntfy_topic="secret-topic",
+        )
         object.__setattr__(settings, "amazon_enabled", False)
         client = object()
 
@@ -65,15 +71,16 @@ class LambdaTests(unittest.TestCase):
     @patch("lambda_handler.scrape_configured_sources", return_value=([], {"amazon": "HTTP 503"}))
     def test_lambda_reports_health_notifications_when_amazon_enabled(self, scrape_all, health):
         store = lh.DynamoStateStore("unused", table=FakeTable())
-        settings = Settings(ntfy_topic="secret")
+        settings = Settings(max_price=1900, ntfy_topic="secret")
         object.__setattr__(settings, "amazon_enabled", True)
         result = lh.run_lambda_cycle(settings, object(), store)
         self.assertEqual(result["health_notifications_sent"], 1)
         self.assertEqual(result["error_sources"], ["amazon"])
         self.assertEqual(result["disabled_sources"], [])
 
+    @patch("lambda_handler.scrape_extra_sources", return_value=([], {}))
     @patch("lambda_handler.retailers.scrape_all_hardened")
-    def test_scrape_configured_sources_skips_amazon_when_disabled(self, scrape_all):
+    def test_scrape_configured_sources_skips_amazon_when_disabled(self, scrape_all, extra):
         original_urls = list(lh.retailers.AMAZON_URLS)
         seen_urls = []
 
@@ -94,7 +101,7 @@ class LambdaTests(unittest.TestCase):
 
     @patch("lambda_handler.run_lambda_cycle", return_value={"ok": True})
     @patch("lambda_handler.DynamoStateStore")
-    def test_lambda_discards_invalid_ntfy_token_and_disables_amazon_by_default(
+    def test_lambda_sets_focused_target_and_disables_amazon_by_default(
         self, store_cls, run_cycle
     ):
         previous_client = lh._CLIENT
@@ -106,16 +113,23 @@ class LambdaTests(unittest.TestCase):
                     "DYNAMODB_TABLE": "test-table",
                     "NTFY_TOPIC": "secret-topic",
                     "NTFY_TOKEN": "unused",
+                    "MAX_PRICE": "1300",
                 },
                 clear=False,
             ):
+                os.environ.pop("TARGET_MAX_PRICE", None)
                 os.environ.pop("ENABLE_AMAZON", None)
                 lh.lambda_handler({}, None)
         finally:
             lh._CLIENT = previous_client
+
         settings = run_cycle.call_args.args[0]
         self.assertEqual(settings.ntfy_token, "")
         self.assertFalse(settings.amazon_enabled)
+        self.assertEqual(settings.max_price, 1900)
+        self.assertEqual(settings.min_memory_gb, 24)
+        self.assertEqual(settings.min_storage_gb, 1024)
+        self.assertEqual(settings.allowed_chips, ("M4", "M5"))
 
 
 if __name__ == "__main__":
