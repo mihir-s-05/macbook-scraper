@@ -4,16 +4,24 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
 import retailer_hardening as retailers
-from macbook_scraper import Client, Settings, is_match, send_ntfy
+from extra_retailers import EXTRA_SOURCE_NAMES, scrape_extra_sources
+from macbook_scraper import Client, Settings, send_ntfy
 from retailer_hardening import update_source_health
+from target_filter import is_target_match
 
 LOG = logging.getLogger("macbook-scraper.lambda")
 STATE_KEY = "monitor-state"
+
+# Extend the existing source-health machinery so the added retailers get the
+# same consecutive-failure/recovery alerts as the original sources.
+retailers.SOURCE_NAMES.update(EXTRA_SOURCE_NAMES)
+retailers.SOURCE_ORDER = tuple(retailers.SOURCE_NAMES)
 
 
 class DynamoStateStore:
@@ -50,44 +58,55 @@ class DynamoStateStore:
         )
 
 
+def _merge_items(*groups: list[Any]) -> list[Any]:
+    found: dict[str, Any] = {}
+    for group in groups:
+        for item in group:
+            if item.key not in found or item.price < found[item.key].price:
+                found[item.key] = item
+    return list(found.values())
+
+
 def scrape_configured_sources(
     settings: Settings,
     client: Client,
 ) -> tuple[list[Any], dict[str, str]]:
-    """Run the cloud-safe sources and optionally Amazon.
-
-    Amazon is disabled by default for Lambda because repeated requests from AWS
-    egress IPs are currently returning HTTP 503. Keeping the existing Amazon
-    implementation behind ENABLE_AMAZON means it can be re-enabled later
-    without changing the scraper again.
-    """
+    """Run Apple/B&H/Best Buy plus the added retailers; Amazon is opt-in."""
 
     if bool(getattr(settings, "amazon_enabled", False)):
-        return retailers.scrape_all_hardened(client, settings)
+        core_items, core_errors = retailers.scrape_all_hardened(client, settings)
+    else:
+        original_amazon_urls = retailers.AMAZON_URLS
+        retailers.AMAZON_URLS = []
+        try:
+            core_items, core_errors = retailers.scrape_all_hardened(client, settings)
+        finally:
+            retailers.AMAZON_URLS = original_amazon_urls
+        core_errors.pop("amazon", None)
+        LOG.info("amazon: disabled by configuration")
 
-    original_amazon_urls = retailers.AMAZON_URLS
-    retailers.AMAZON_URLS = []
-    try:
-        items, errors = retailers.scrape_all_hardened(client, settings)
-    finally:
-        retailers.AMAZON_URLS = original_amazon_urls
+    extra_items, extra_errors = scrape_extra_sources(client)
+    counts = Counter(item.source for item in extra_items)
+    for source in EXTRA_SOURCE_NAMES:
+        if source in counts:
+            LOG.info("%s: parsed %d listings", source, counts[source])
+        elif source in extra_errors:
+            LOG.warning("%s scrape degraded: %s", source, extra_errors[source])
 
-    # scrape_all_hardened treats an empty Amazon job list as a source error.
-    # For an intentionally disabled source, remove that synthetic error.
-    errors.pop("amazon", None)
-    LOG.info("amazon: disabled by configuration")
-    return items, errors
+    errors = dict(core_errors)
+    errors.update(extra_errors)
+    return _merge_items(core_items, extra_items), errors
 
 
 def run_lambda_cycle(settings: Settings, client: Client, store: DynamoStateStore) -> dict[str, Any]:
     now = time.time()
     items, errors = scrape_configured_sources(settings, client)
     matches = sorted(
-        (item for item in items if is_match(item, settings)),
+        (item for item in items if is_target_match(item, settings)),
         key=lambda item: (item.price, -item.memory_gb, -item.storage_gb),
     )
     LOG.info(
-        "cycle: %d listings, %d matches <= $%.2f; errors=%s",
+        "cycle: %d listings, %d focused 15-inch Air matches < $%.2f; errors=%s",
         len(items),
         len(matches),
         settings.max_price,
@@ -144,6 +163,14 @@ def run_lambda_cycle(settings: Settings, client: Client, store: DynamoStateStore
             "last_cycle_iso": datetime.now(timezone.utc).isoformat(),
             "last_error_sources": errors,
             "disabled_sources": disabled_sources,
+            "target": {
+                "model": "MacBook Air",
+                "display_inches": 15,
+                "min_memory_gb": settings.min_memory_gb,
+                "min_storage_gb": settings.min_storage_gb,
+                "allowed_chips": list(settings.allowed_chips),
+                "price_ceiling_exclusive": settings.max_price,
+            },
         }
     )
     store.save(state)
@@ -167,6 +194,14 @@ def lambda_handler(event: dict[str, Any] | None, context: Any) -> dict[str, Any]
 
     logging.getLogger().setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
     settings = Settings.from_env()
+
+    # This monitor is intentionally focused now. TARGET_MAX_PRICE is separate
+    # from the old CloudFormation MAX_PRICE value so an existing saved 1300
+    # deployment does not override the new <1900 target on update.
+    object.__setattr__(settings, "max_price", float(os.getenv("TARGET_MAX_PRICE", "1900")))
+    object.__setattr__(settings, "min_memory_gb", 24)
+    object.__setattr__(settings, "min_storage_gb", 1024)
+    object.__setattr__(settings, "allowed_chips", ("M4", "M5"))
 
     # ntfy access tokens always use the tk_ prefix. If SAM guided deploy captured
     # a placeholder or other non-token value, silently treat it as unauthenticated
